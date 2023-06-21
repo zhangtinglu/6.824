@@ -19,6 +19,8 @@ package raft
 
 import (
 	//	"bytes"
+
+	"math/rand"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -70,11 +72,25 @@ type Raft struct {
 	// Your data here (2A, 2B, 2C).
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
-	role             Role
+	voteFor          int
+	log              []LogEntry
 	currentTerm      uint64
+	commitIndex      uint64
+	lastApplied      uint64
+	role             Role
 	HeartbeatTimeout time.Duration
 	ElectionTimeout  time.Duration
 	rpcCh            chan RPC
+}
+
+type LogEntry struct {
+	Term    uint64
+	Command interface{}
+}
+
+type RPC struct {
+	term  uint64
+	reply interface{}
 }
 
 // return currentTerm and whether this server
@@ -255,6 +271,10 @@ func (rf *Raft) ticker() {
 		// Your code here to check if a leader election should
 		// be started and to randomize sleeping time using
 		// time.Sleep().
+		rand.Seed(time.Now().UnixNano())
+		electionTimeout := time.Duration(rand.Intn(int(rf.HeartbeatTimeout))+int(rf.ElectionTimeout)) * time.Millisecond
+		time.Sleep(electionTimeout)
+
 		role := rf.getRole()
 		switch role {
 		case Leader:
@@ -272,20 +292,40 @@ func (rf *Raft) getRole() Role {
 	return Role(atomic.LoadUint32(roleAddr))
 }
 
+func (rf *Raft) setRole(role Role) {
+	roleAddr := (*uint32)(&rf.role)
+	atomic.StoreUint32(roleAddr, uint32(role))
+}
+
 func (rf *Raft) runFollower() {
 	for rf.getRole() == Follower {
 		select {
 		case <-rf.rpcCh:
 			continue
 		case <-time.After(rf.HeartbeatTimeout):
-			continue
+			rf.setRole(Candidate)
+			return
 		default:
 			continue
 		}
 	}
 }
-func (rf *Raft) runLeader()    {}
-func (rf *Raft) runCandidate() {}
+func (rf *Raft) runLeader() {}
+
+func (rf *Raft) runCandidate() {
+	for rf.getRole() == Candidate {
+		select {
+		case <-rf.rpcCh:
+			continue
+		case <-time.After(rf.HeartbeatTimeout):
+			rf.setRole(Candidate)
+			return
+		default:
+			rf.startElection()
+		}
+
+	}
+}
 
 //
 // the service or tester wants to create a Raft server. the ports
@@ -309,6 +349,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.role = Follower
 	rf.HeartbeatTimeout = 100 * time.Millisecond
 	rf.ElectionTimeout = 100 * time.Millisecond
+	rf.rpcCh = make(chan RPC, 100)
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
