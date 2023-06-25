@@ -72,7 +72,7 @@ type Raft struct {
 	// Your data here (2A, 2B, 2C).
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
-	voteFor          int
+	votedFor         int
 	log              []LogEntry
 	currentTerm      uint64
 	commitIndex      uint64
@@ -80,17 +80,13 @@ type Raft struct {
 	role             Role
 	HeartbeatTimeout time.Duration
 	ElectionTimeout  time.Duration
-	rpcCh            chan RPC
+	rpcCh            chan interface{}
 }
 
 type LogEntry struct {
 	Term    uint64
+	Index   uint64
 	Command interface{}
-}
-
-type RPC struct {
-	term  uint64
-	reply interface{}
 }
 
 // return currentTerm and whether this server
@@ -167,6 +163,10 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 //
 type RequestVoteArgs struct {
 	// Your data here (2A, 2B).
+	Term         uint64
+	CandidateId  int
+	LastLogIndex uint64
+	LastLogTerm  uint64
 }
 
 //
@@ -175,6 +175,8 @@ type RequestVoteArgs struct {
 //
 type RequestVoteReply struct {
 	// Your data here (2A).
+	Term        uint64
+	VoteGranted bool
 }
 
 //
@@ -182,6 +184,7 @@ type RequestVoteReply struct {
 //
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
+
 }
 
 //
@@ -301,7 +304,13 @@ func (rf *Raft) runFollower() {
 	for rf.getRole() == Follower {
 		select {
 		case <-rf.rpcCh:
-			continue
+			req := <-rf.rpcCh
+			switch req.(type) {
+			// case AppendEntriesArgs:
+			// 	rf.handleAppendEntries(req.(AppendEntriesArgs))
+			case RequestVoteArgs:
+				rf.handleRequestVote(req.(RequestVoteArgs))
+			}
 		case <-time.After(rf.HeartbeatTimeout):
 			rf.setRole(Candidate)
 			return
@@ -310,20 +319,63 @@ func (rf *Raft) runFollower() {
 		}
 	}
 }
+
+func (rf *Raft) handleRequestVote(args RequestVoteArgs) {
+	if args.Term < rf.currentTerm {
+		return
+	}
+
+	rf.currentTerm = args.Term
+	rf.votedFor = -1
+	rf.setRole(Follower)
+}
+
 func (rf *Raft) runLeader() {}
 
 func (rf *Raft) runCandidate() {
-	for rf.getRole() == Candidate {
-		select {
-		case <-rf.rpcCh:
+	rf.currentTerm++
+	rf.votedFor = rf.me
+
+	voteReceived := 1
+	voteCh := make(chan bool, len(rf.peers))
+
+	// send RequestVote RPCs to all other servers concurrently
+	for i := range rf.peers {
+		if i == rf.me {
 			continue
-		case <-time.After(rf.HeartbeatTimeout):
-			rf.setRole(Candidate)
-			return
-		default:
-			rf.startElection()
 		}
 
+		go func(server int) {
+			args := RequestVoteArgs{
+				Term:         rf.currentTerm,
+				CandidateId:  rf.me,
+				LastLogIndex: rf.log[len(rf.log)-1].Index,
+				LastLogTerm:  rf.log[len(rf.log)-1].Term,
+			}
+			reply := RequestVoteReply{}
+			ok := rf.peers[server].Call("Raft.RequestVote", &args, &reply)
+			if ok {
+				voteCh <- reply.VoteGranted
+			}
+		}(i)
+	}
+
+	for rf.getRole() == Candidate {
+		select {
+		case <-voteCh:
+			voteReceived++
+			if voteReceived > len(rf.peers)/2 {
+				rf.setRole(Leader)
+				return
+			}
+		case <-time.After(rf.ElectionTimeout):
+			return
+		case <-rf.rpcCh:
+			rf.setRole(Follower)
+			return
+		default:
+			continue
+		}
 	}
 }
 
@@ -349,7 +401,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.role = Follower
 	rf.HeartbeatTimeout = 100 * time.Millisecond
 	rf.ElectionTimeout = 100 * time.Millisecond
-	rf.rpcCh = make(chan RPC, 100)
+	rf.rpcCh = make(chan interface{}, 100)
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
