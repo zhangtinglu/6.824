@@ -20,7 +20,6 @@ package raft
 import (
 	//	"bytes"
 
-	"math/rand"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -96,6 +95,8 @@ func (rf *Raft) GetState() (int, bool) {
 	var term int
 	var isleader bool
 	// Your code here (2A).
+	term = int(atomic.LoadUint64(&rf.currentTerm))
+	isleader = rf.role == Leader
 	return term, isleader
 }
 
@@ -181,10 +182,22 @@ type RequestVoteReply struct {
 
 //
 // example RequestVote RPC handler.
-//
+// 如果别人请求让我投票，我应该怎么办？
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
+	if args.Term > rf.currentTerm {
+		if rf.votedFor == -1 || rf.votedFor == args.CandidateId {
+			if args.LastLogTerm >= rf.log[len(rf.log)-1].Term && args.LastLogIndex >= rf.log[len(rf.log)-1].Index {
+				rf.votedFor = args.CandidateId
+				reply.VoteGranted = true
+				reply.Term = rf.currentTerm
+				return
+			}
+		}
 
+	}
+	reply.VoteGranted = false
+	reply.Term = rf.currentTerm
 }
 
 //
@@ -216,7 +229,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 // that the caller passes the address of the reply struct with &, not
 // the struct itself.
 //
-func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
+func (rf *Raft) SendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
 	return ok
 }
@@ -274,10 +287,6 @@ func (rf *Raft) ticker() {
 		// Your code here to check if a leader election should
 		// be started and to randomize sleeping time using
 		// time.Sleep().
-		rand.Seed(time.Now().UnixNano())
-		electionTimeout := time.Duration(rand.Intn(int(rf.HeartbeatTimeout))+int(rf.ElectionTimeout)) * time.Millisecond
-		time.Sleep(electionTimeout)
-
 		role := rf.getRole()
 		switch role {
 		case Leader:
@@ -304,30 +313,12 @@ func (rf *Raft) runFollower() {
 	for rf.getRole() == Follower {
 		select {
 		case <-rf.rpcCh:
-			req := <-rf.rpcCh
-			switch req.(type) {
-			// case AppendEntriesArgs:
-			// 	rf.handleAppendEntries(req.(AppendEntriesArgs))
-			case RequestVoteArgs:
-				rf.handleRequestVote(req.(RequestVoteArgs))
-			}
-		case <-time.After(rf.HeartbeatTimeout):
+			continue
+		case <-time.After(rf.ElectionTimeout):
 			rf.setRole(Candidate)
 			return
-		default:
-			continue
 		}
 	}
-}
-
-func (rf *Raft) handleRequestVote(args RequestVoteArgs) {
-	if args.Term < rf.currentTerm {
-		return
-	}
-
-	rf.currentTerm = args.Term
-	rf.votedFor = -1
-	rf.setRole(Follower)
 }
 
 func (rf *Raft) runLeader() {}
@@ -368,13 +359,10 @@ func (rf *Raft) runCandidate() {
 				rf.setRole(Leader)
 				return
 			}
-		case <-time.After(rf.ElectionTimeout):
-			return
+		// TODO: check if the candidate's term is out of date
 		case <-rf.rpcCh:
 			rf.setRole(Follower)
 			return
-		default:
-			continue
 		}
 	}
 }
@@ -399,8 +387,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// Your initialization code here (2A, 2B, 2C).
 	rf.role = Follower
-	rf.HeartbeatTimeout = 100 * time.Millisecond
-	rf.ElectionTimeout = 100 * time.Millisecond
+	rf.HeartbeatTimeout = 150 * time.Millisecond
+	rf.ElectionTimeout = 300 * time.Millisecond
 	rf.rpcCh = make(chan interface{}, 100)
 
 	// initialize from state persisted before a crash

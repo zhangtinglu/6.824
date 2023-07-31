@@ -285,7 +285,7 @@ func (cfg *config) start1(i int, applier func(int, chan ApplyMsg)) {
 	// so that old crashed instance's ClientEnds can't send.
 	cfg.endnames[i] = make([]string, cfg.n)
 	for j := 0; j < cfg.n; j++ {
-		cfg.endnames[i][j] = randstring(20)
+		cfg.endnames[i][j] = fmt.Sprintf("outgoing-%d-%d", i, j)
 	}
 
 	// a fresh set of ClientEnds.
