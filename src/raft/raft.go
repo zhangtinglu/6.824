@@ -228,16 +228,6 @@ func (rf *Raft) ticker() {
 	}
 }
 
-func (rf *Raft) getRole() Role {
-	roleAddr := (*uint32)(&rf.role)
-	return Role(atomic.LoadUint32(roleAddr))
-}
-
-func (rf *Raft) setRole(role Role) {
-	roleAddr := (*uint32)(&rf.role)
-	atomic.StoreUint32(roleAddr, uint32(role))
-}
-
 func (rf *Raft) runFollower() {
 	for rf.getRole() == Follower {
 		select {
@@ -256,7 +246,7 @@ func (rf *Raft) runLeader() {
 		select {
 		case <-rf.rpcCh:
 			continue
-		case <-randomTimeout(rf.HeartbeatTimeout):
+		case <-time.After(rf.HeartbeatTimeout):
 			rf.broadcastHearteat()
 		}
 	}
@@ -301,6 +291,7 @@ func (rf *Raft) runCandidate() {
 		}(i)
 	}
 
+	timer := randomTimeout(rf.ElectionTimeout)
 	for rf.getRole() == Candidate {
 		select {
 		case <-voteCh:
@@ -309,10 +300,20 @@ func (rf *Raft) runCandidate() {
 				rf.setRole(Leader)
 				return
 			}
-		case <-randomTimeout(rf.ElectionTimeout):
+		case <-timer:
 			return
 		}
 	}
+}
+
+func (rf *Raft) getRole() Role {
+	roleAddr := (*uint32)(&rf.role)
+	return Role(atomic.LoadUint32(roleAddr))
+}
+
+func (rf *Raft) setRole(role Role) {
+	roleAddr := (*uint32)(&rf.role)
+	atomic.StoreUint32(roleAddr, uint32(role))
 }
 
 func (rf *Raft) broadcastHearteat() {
@@ -461,50 +462,10 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if args.Term < rf.currentTerm {
 		return
 	}
-	if args.PrevLogIndex > rf.log[len(rf.log)-1].Index {
-		return
-	}
-	if args.PrevLogTerm != rf.log[args.PrevLogIndex].Term {
-		return
-	}
-	if args.Entries != nil {
-		rf.log = append(rf.log[:args.PrevLogIndex+1], args.Entries...)
-	}
-	if args.LeaderCommit > rf.commitIndex {
-		rf.commitIndex = args.LeaderCommit
-	}
+	// 不要再接着ticker了
 	reply.Success = true
 }
 
-//
-// example code to send a RequestVote RPC to a server.
-// server is the index of the target server in rf.peers[].
-// expects RPC arguments in args.
-// fills in *reply with RPC reply, so caller should
-// pass &reply.
-// the types of the args and reply passed to Call() must be
-// the same as the types of the arguments declared in the
-// handler function (including whether they are pointers).
-//
-// The labrpc package simulates a lossy network, in which servers
-// may be unreachable, and in which requests and replies may be lost.
-// Call() sends a request and waits for a reply. If a reply arrives
-// within a timeout interval, Call() returns true; otherwise
-// Call() returns false. Thus Call() may not return for a while.
-// A false return can be caused by a dead server, a live server that
-// can't be reached, a lost request, or a lost reply.
-//
-// Call() is guaranteed to return (perhaps after a delay) *except* if the
-// handler function on the server side does not return.  Thus there
-// is no need to implement your own timeouts around Call().
-//
-// look at the comments in ../labrpc/labrpc.go for more details.
-//
-// if you're having trouble getting RPC to work, check that you've
-// capitalized all field names in structs passed over RPC, and
-// that the caller passes the address of the reply struct with &, not
-// the struct itself.
-//
 func (rf *Raft) SendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
 	return ok
