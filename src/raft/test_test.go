@@ -22,7 +22,8 @@ import (
 const RaftElectionTimeout = 1000 * time.Millisecond
 
 func TestTicker(t *testing.T) {
-	ch := time.After(1 * time.Second)
+	var ch <-chan time.Time
+	ch = time.After(1 * time.Second)
 	ch1 := time.After(1 * time.Second)
 
 	for {

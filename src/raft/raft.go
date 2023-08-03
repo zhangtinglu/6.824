@@ -32,7 +32,11 @@ import (
 )
 
 var (
-	logger = log.New(os.Stdout, "[raft]", log.LstdFlags|log.Lmicroseconds)
+	logger                = log.New(os.Stdout, "[raft]", log.LstdFlags|log.Lmicroseconds)
+	heartbeatTimeout      = 1000 * time.Millisecond
+	electionTimeout       = 1500 * time.Millisecond
+	ElectionTimeoutTimer  <-chan time.Time
+	HeartbeatTimeoutTimer <-chan time.Time
 )
 
 //
@@ -229,11 +233,12 @@ func (rf *Raft) ticker() {
 }
 
 func (rf *Raft) runFollower() {
+	ElectionTimeoutTimer = randomTimeout(electionTimeout)
 	for rf.getRole() == Follower {
 		select {
 		case <-rf.rpcCh:
 			continue
-		case <-randomTimeout(rf.ElectionTimeout):
+		case <-ElectionTimeoutTimer:
 			rf.setRole(Candidate)
 			return
 		}
@@ -242,12 +247,14 @@ func (rf *Raft) runFollower() {
 
 func (rf *Raft) runLeader() {
 	rf.broadcastHearteat()
+	HeartbeatTimeoutTimer = time.After(heartbeatTimeout)
 	for rf.getRole() == Leader {
 		select {
 		case <-rf.rpcCh:
 			continue
-		case <-time.After(rf.HeartbeatTimeout):
+		case <-HeartbeatTimeoutTimer:
 			rf.broadcastHearteat()
+			HeartbeatTimeoutTimer = time.After(heartbeatTimeout)
 		}
 	}
 }
@@ -377,16 +384,17 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.peers = peers
 	rf.persister = persister
 	rf.me = me
+	rf.votedFor = -1
 
 	// Your initialization code here (2A, 2B, 2C).
 	rf.role = Follower
-	rf.HeartbeatTimeout = 1500 * time.Millisecond
-	rf.ElectionTimeout = 2000 * time.Millisecond
+	rf.HeartbeatTimeout = heartbeatTimeout
+	rf.ElectionTimeout = electionTimeout
 	rf.rpcCh = make(chan interface{}, 100)
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
-
+	// ElectionTimeoutTimer <- randomTimeout(rf.ElectionTimeout)
 	// start ticker goroutine to start elections
 	go rf.ticker()
 
@@ -459,10 +467,23 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	reply.Term = rf.currentTerm
 	reply.Success = false
+	if args.Term > rf.currentTerm {
+		rf.setRole(Follower)
+		rf.currentTerm = args.Term
+		rf.votedFor = -1
+	}
+
 	if args.Term < rf.currentTerm {
 		return
 	}
-	// 不要再接着ticker了
+
+	// 不包含上一条日志
+	// 日志冲突，同一个index，但是term不同
+	// 当前的日志不存在就append
+	// 更新 commitIndex
+	logger.Printf("[s%d] accept AppendEntries from [s%d], currentTerm: %d", rf.me, args.LeaderId, rf.currentTerm)
+	// 接收到消息后就重置自己的计时器
+	ElectionTimeoutTimer = randomTimeout(rf.ElectionTimeout)
 	reply.Success = true
 }
 
