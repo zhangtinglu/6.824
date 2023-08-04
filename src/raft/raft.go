@@ -32,11 +32,9 @@ import (
 )
 
 var (
-	logger                = log.New(os.Stdout, "[raft]", log.LstdFlags|log.Lmicroseconds)
-	heartbeatTimeout      = 1000 * time.Millisecond
-	electionTimeout       = 1500 * time.Millisecond
-	ElectionTimeoutTimer  <-chan time.Time
-	HeartbeatTimeoutTimer <-chan time.Time
+	logger           = log.New(os.Stdout, "[raft]", log.LstdFlags|log.Lmicroseconds)
+	heartbeatTimeout = 1000 * time.Millisecond
+	electionTimeout  = 1500 * time.Millisecond
 )
 
 //
@@ -81,15 +79,17 @@ type Raft struct {
 	// Your data here (2A, 2B, 2C).
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
-	votedFor         int
-	log              []LogEntry
-	currentTerm      uint64
-	commitIndex      uint64
-	lastApplied      uint64
-	role             Role
-	HeartbeatTimeout time.Duration
-	ElectionTimeout  time.Duration
-	rpcCh            chan interface{}
+	votedFor              int
+	log                   []LogEntry
+	currentTerm           uint64
+	commitIndex           uint64
+	lastApplied           uint64
+	role                  Role
+	rpcCh                 chan interface{}
+	heartbeatTimeout      time.Duration
+	electionTimeout       time.Duration
+	electionTimeoutTimer  *time.Timer
+	heartbeatTimeoutTimer *time.Timer
 }
 
 type LogEntry struct {
@@ -232,29 +232,29 @@ func (rf *Raft) ticker() {
 	}
 }
 
-func (rf *Raft) runFollower() {
-	ElectionTimeoutTimer = randomTimeout(electionTimeout)
-	for rf.getRole() == Follower {
-		select {
-		case <-rf.rpcCh:
-			continue
-		case <-ElectionTimeoutTimer:
-			rf.setRole(Candidate)
-			return
-		}
-	}
-}
-
 func (rf *Raft) runLeader() {
 	rf.broadcastHearteat()
-	HeartbeatTimeoutTimer = time.After(heartbeatTimeout)
+	rf.heartbeatTimeoutTimer = time.NewTimer(rf.heartbeatTimeout)
 	for rf.getRole() == Leader {
 		select {
 		case <-rf.rpcCh:
 			continue
-		case <-HeartbeatTimeoutTimer:
+		case <-rf.heartbeatTimeoutTimer.C:
 			rf.broadcastHearteat()
-			HeartbeatTimeoutTimer = time.After(heartbeatTimeout)
+			rf.heartbeatTimeoutTimer.Reset(rf.heartbeatTimeout)
+		}
+	}
+}
+
+func (rf *Raft) runFollower() {
+	rf.electionTimeoutTimer = time.NewTimer(randomTimeout(rf.electionTimeout))
+	for rf.getRole() == Follower {
+		select {
+		case <-rf.rpcCh:
+			continue
+		case <-rf.electionTimeoutTimer.C:
+			rf.setRole(Candidate)
+			return
 		}
 	}
 }
@@ -265,6 +265,7 @@ func (rf *Raft) runCandidate() {
 
 	voteReceived := 1
 	voteCh := make(chan bool, len(rf.peers))
+	rf.electionTimeoutTimer = time.NewTimer(randomTimeout(rf.electionTimeout))
 
 	// send RequestVote RPCs to all other servers concurrently
 	for i := 0; i < len(rf.peers); i++ {
@@ -298,7 +299,6 @@ func (rf *Raft) runCandidate() {
 		}(i)
 	}
 
-	timer := randomTimeout(rf.ElectionTimeout)
 	for rf.getRole() == Candidate {
 		select {
 		case <-voteCh:
@@ -307,7 +307,7 @@ func (rf *Raft) runCandidate() {
 				rf.setRole(Leader)
 				return
 			}
-		case <-timer:
+		case <-rf.electionTimeoutTimer.C:
 			return
 		}
 	}
@@ -362,9 +362,8 @@ func (rf *Raft) broadcastAppendEntries(args *AppendEntriesArgs, reply *AppendEnt
 	}
 }
 
-func randomTimeout(min time.Duration) <-chan time.Time {
-	extra := time.Duration(rand.Int63()) % min
-	return time.After(min + extra)
+func randomTimeout(min time.Duration) time.Duration {
+	return time.Duration(rand.Int63())%min + min
 }
 
 //
@@ -388,8 +387,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// Your initialization code here (2A, 2B, 2C).
 	rf.role = Follower
-	rf.HeartbeatTimeout = heartbeatTimeout
-	rf.ElectionTimeout = electionTimeout
+	rf.heartbeatTimeout = heartbeatTimeout
+	rf.electionTimeout = electionTimeout
 	rf.rpcCh = make(chan interface{}, 100)
 
 	// initialize from state persisted before a crash
@@ -483,7 +482,11 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// 更新 commitIndex
 	logger.Printf("[s%d] accept AppendEntries from [s%d], currentTerm: %d", rf.me, args.LeaderId, rf.currentTerm)
 	// 接收到消息后就重置自己的计时器
-	ElectionTimeoutTimer = randomTimeout(rf.ElectionTimeout)
+	if !rf.electionTimeoutTimer.Stop() {
+		<-rf.electionTimeoutTimer.C
+	}
+	rf.electionTimeoutTimer.Reset(randomTimeout(rf.electionTimeout))
+	// rf.electionTimeoutTimer = randomTimeout(rf.electionTimeout)
 	reply.Success = true
 }
 

@@ -10,6 +10,7 @@ package raft
 
 import (
 	"fmt"
+	"log"
 	"math/rand"
 	"sync"
 	"sync/atomic"
@@ -22,20 +23,26 @@ import (
 const RaftElectionTimeout = 1000 * time.Millisecond
 
 func TestTicker(t *testing.T) {
-	var ch <-chan time.Time
-	ch = time.After(1 * time.Second)
-	ch1 := time.After(1 * time.Second)
+	t1 := time.NewTimer(2 * time.Second)
+
+	go func(t *time.Timer) {
+		log.Println("start")
+		time.Sleep(1 * time.Second)
+		if !t.Stop() {
+			<-t.C
+		}
+		t.Reset(5 * time.Second)
+		log.Println("end")
+	}(t1)
 
 	for {
 		select {
-		case <-ch:
-			fmt.Println("timeout")
-			ch = time.After(1 * time.Second)
-		case <-ch1:
-			fmt.Println("timeout1")
+		case <-t1.C:
+			t.Log(time.Now(), "timeout")
+			t1.Reset(3 * time.Second)
 		}
-	}
 
+	}
 }
 
 func TestInitialElection2A(t *testing.T) {
