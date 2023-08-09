@@ -101,7 +101,6 @@ type LogEntry struct {
 // return currentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
-
 	var term int
 	var isleader bool
 	// Your code here (2A).
@@ -185,11 +184,31 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	index := -1
 	term := -1
-	isLeader := true
+	if rf.getRole() != Leader {
+		return index, term, false
+	}
 
-	// Your code here (2B).
+	// Your code here (2B). 如果确实是master，那么就把这个命令加入到log中。
+	prevLogIndex := rf.log[len(rf.log)-1].Index
+	prevLogTerm := rf.log[len(rf.log)-1].Term
+	index = int(prevLogIndex) + 1
+	log := LogEntry{
+		Term:    rf.currentTerm,
+		Index:   uint64(index),
+		Command: command,
+	}
+	rf.log = append(rf.log, log)
+	appendEntriesArgs := AppendEntriesArgs{
+		Term:         rf.currentTerm,
+		LeaderId:     rf.me,
+		PrevLogIndex: prevLogIndex,
+		PrevLogTerm:  prevLogTerm,
+		Entries:      []LogEntry{log},
+		LeaderCommit: rf.commitIndex,
+	}
+	rf.broadcastAppendEntries(&appendEntriesArgs)
 
-	return index, term, isLeader
+	return index, term, true
 }
 
 //
@@ -324,7 +343,7 @@ func (rf *Raft) setRole(role Role) {
 }
 
 func (rf *Raft) broadcastHearteat() {
-	args := AppendEntriesArgs{
+	args := &AppendEntriesArgs{
 		Term:         rf.currentTerm,
 		LeaderId:     rf.me,
 		PrevLogIndex: 0,
@@ -338,11 +357,7 @@ func (rf *Raft) broadcastHearteat() {
 		args.PrevLogTerm = rf.log[len(rf.log)-1].Term
 	}
 
-	reply := AppendEntriesReply{}
-	rf.broadcastAppendEntries(&args, &reply)
-}
-
-func (rf *Raft) broadcastAppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
+	reply := &AppendEntriesReply{}
 	for i := 0; i < len(rf.peers); i++ {
 		if i == rf.me {
 			continue
@@ -359,6 +374,40 @@ func (rf *Raft) broadcastAppendEntries(args *AppendEntriesArgs, reply *AppendEnt
 			}
 			logger.Printf("[s%d] Raft.AppendEntries -> [s%d]", rf.me, server)
 		}(i)
+	}
+}
+
+func (rf *Raft) broadcastAppendEntries(args *AppendEntriesArgs) {
+	applyCh := make(chan bool, len(rf.peers))
+	applyReceived := 1
+
+	for i := 0; i < len(rf.peers); i++ {
+		if i == rf.me {
+			continue
+		}
+		go func(server int, args *AppendEntriesArgs) {
+			reply := &AppendEntriesReply{}
+			ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
+			if ok {
+				if reply.Term > rf.currentTerm {
+					rf.setRole(Follower)
+					rf.currentTerm = reply.Term
+					rf.votedFor = -1
+				} else if reply.Success {
+					applyCh <- true
+				}
+			}
+			logger.Printf("[s%d] Raft.AppendEntries -> [s%d]", rf.me, server)
+		}(i, args)
+	}
+
+	for rf.getRole() == Leader {
+		<-applyCh
+		applyReceived++
+		if applyReceived > len(rf.peers)/2 {
+			rf.commitIndex++
+			return
+		}
 	}
 }
 
@@ -393,7 +442,15 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
-	// ElectionTimeoutTimer <- randomTimeout(rf.ElectionTimeout)
+	if rf.log == nil {
+		log := LogEntry{
+			Term:    0,
+			Index:   0,
+			Command: nil,
+		}
+		rf.log = append(rf.log, log)
+	}
+
 	// start ticker goroutine to start elections
 	go rf.ticker()
 
